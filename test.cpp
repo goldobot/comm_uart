@@ -75,7 +75,7 @@ int main(int argc, char *argv[])
         printf("Cannot open uart device (%s)\n", portname);
         return -1;
     }
-    set_interface_attribs(fd, B115200);
+    set_interface_attribs(fd, B460800);
 
     zmq_context = zmq_init(1);
 
