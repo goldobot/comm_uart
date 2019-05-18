@@ -7,6 +7,9 @@
 
 #include "comm_serializer.hpp"
 
+void* zmq_context = nullptr;
+void* pub_socket = nullptr;
+void* sub_socket = nullptr;
 
 int set_interface_attribs(int fd, int speed)
 {
@@ -60,30 +63,34 @@ void set_mincount(int fd, int mcount)
 }
 
 
+void init_zmq()
+{
+    int rc;
+    zmq_context = zmq_init(1);
+
+    pub_socket = zmq_socket(zmq_context, ZMQ_PUB);
+    rc = zmq_bind(pub_socket, "tcp://*:3001");
+    if(rc != 0) printf("failed to bind pub socket");
+
+    sub_socket = zmq_socket(zmq_context, ZMQ_SUB);  
+    rc = zmq_bind(sub_socket, "tcp://*:3002");
+    zmq_setsockopt(sub_socket,ZMQ_SUBSCRIBE, "", 0); 
+    if(rc != 0) printf("failed to bind sub socket");
+};
 
 int main(int argc, char *argv[])
 {
     char *portname = "/dev/ttyACM0";
     int fd;
-    void* zmq_context;
-    void* pub_socket;
-    void* pull_socket;
-    int rc;
+    
+    init_zmq();
 
     fd = open(portname, O_RDWR | O_NOCTTY | O_SYNC);
     if (fd<0) {
         printf("Cannot open uart device (%s)\n", portname);
         return -1;
     }
-    set_interface_attribs(fd, B460800);
-
-    zmq_context = zmq_init(1);
-
-    pub_socket = zmq_socket(zmq_context, ZMQ_PUB);
-    rc = zmq_bind(pub_socket, "tcp://*:3001");
-
-    pull_socket = zmq_socket(zmq_context, ZMQ_PULL);
-    rc = zmq_bind(pull_socket, "tcp://*:3002");
+    set_interface_attribs(fd, B230400);    
 
     zmq_pollitem_t poll_items[2];
 
@@ -91,7 +98,7 @@ int main(int argc, char *argv[])
     poll_items[0].fd = fd;
     poll_items[0].events = ZMQ_POLLIN;
 
-    poll_items[1].socket = pull_socket;
+    poll_items[1].socket = sub_socket;
     poll_items[1].fd = 0;
     poll_items[1].events = ZMQ_POLLIN;
 
@@ -113,7 +120,6 @@ int main(int argc, char *argv[])
 
             while(deserializer.message_ready())
             {
-                /*printf("received message \n");*/
                 uint16_t recv_message_type = deserializer.message_type();
                 size_t recv_message_size = deserializer.message_size();
                 deserializer.pop_message(tmp_buffer, sizeof(tmp_buffer));
@@ -125,26 +131,26 @@ int main(int argc, char *argv[])
                 {
                     // Echo synchronization messages
                     serializer.push_message(0, (unsigned char*)"goldobot", 8);
-                }           
+                }
             }
         }
         if(poll_items[1].revents && ZMQ_POLLIN)
-        {            
+        {   
             unsigned char buff[1024];
             size_t bytes_read = 0;
             int64_t more=1;
             size_t more_size = sizeof(more);
             while(more)
             {
-                bytes_read += zmq_recv(pull_socket, buff + bytes_read, sizeof(buff) - bytes_read, 0);           
-                zmq_getsockopt(pull_socket, ZMQ_RCVMORE, &more, &more_size);
+                bytes_read += zmq_recv(sub_socket, buff + bytes_read, sizeof(buff) - bytes_read, 0);           
+                zmq_getsockopt(sub_socket, ZMQ_RCVMORE, &more, &more_size);
             }
             buff[bytes_read] = 0;
             uint16_t message_type = *(uint16_t*)(buff);
             serializer.push_message(message_type, buff+2, bytes_read - 2);
         }
         size_t dlen = serializer.pop_data(tmp_buffer, sizeof(tmp_buffer));
-        write(fd, tmp_buffer, dlen);        
+        write(fd, tmp_buffer, dlen);
     }
     zmq_term(zmq_context);
 }
