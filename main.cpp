@@ -6,6 +6,7 @@
 #include <zmq.h>
 
 #include "comm_serializer.hpp"
+#include "comm_deserializer.hpp"
 
 void* zmq_context = nullptr;
 void* pub_socket = nullptr;
