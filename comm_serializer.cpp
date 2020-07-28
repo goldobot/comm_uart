@@ -1,18 +1,7 @@
-#include "comm_serializer.hpp"
+#include "goldobot/comm_serializer.hpp"
+#include "goldobot/utils/crc.hpp"
 
 using namespace goldobot;
-
-uint16_t update_crc16(const unsigned char* data_p, size_t length, uint16_t crc = 0xFFFF)
-{
-    unsigned char x;
-
-    while (length--) {
-        x = crc >> 8 ^ *data_p++;
-        x ^= x >> 4;
-        crc = (crc << 8) ^ ((unsigned short)(x << 12)) ^ ((unsigned short)(x << 5)) ^ ((unsigned short)x);
-    }
-    return crc;
-}
 
 size_t write_varint(uint16_t val, unsigned char* buffer)
 {
@@ -40,20 +29,30 @@ CommSerializer::CommSerializer(unsigned char* buffer, size_t size):
 
 bool CommSerializer::push_message(uint16_t message_type, const unsigned char* buffer, size_t msg_size)
 {
-	// Reject message if buffer is full
-	if(size() + msg_size + 12 >= m_buffer_size)
-	{
-		return false;
-	}
-    unsigned char header[6];
-    unsigned char* ptr = header + 2;
-    header[0] = 0x80 | (m_sequence_number & 0x7f);
-    header[1] = 0x80;
+    // Reject message if buffer is full
+    if (size() + msg_size + 12 >= m_buffer_size)
+    {
+        return false;
+    }
+    unsigned char header[8];
+    unsigned char* ptr = header + 4;
+    header[0] = 0x0a;
+    header[1] = 0x35;
+    if (m_first_message)
+    {
+        header[2] = (m_sequence_number & 0x7f);
+    }
+    else
+    {
+        header[2] = 0x80 | (m_sequence_number & 0x7f);
+    }
+    
+    header[3] = 0x80;
     ptr += write_varint(message_type, ptr);
     ptr += write_varint(msg_size, ptr);
 
     // Compute crc
-    uint16_t crc = update_crc16(header, ptr-header);
+    uint16_t crc = update_crc16(header + 2, ptr-(header + 2));
     crc = update_crc16(buffer, msg_size, crc);
 
     // Copy data into ring buffer

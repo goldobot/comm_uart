@@ -9,7 +9,11 @@ namespace goldobot
 	public:
 		struct Statistics
 		{
+			uint32_t messages_received;
+			uint32_t bytes_received;
 			uint32_t sequence_errors{0};
+			uint32_t crc_errors{0};
+			uint32_t buffer_high_watermark{0};
 		};
 
 	public:
@@ -21,6 +25,9 @@ namespace goldobot
 	    uint16_t message_type() const;
 	    size_t message_size() const;
 	    void pop_message(unsigned char* buffer, size_t size);
+
+		// Return reception statistics for the last period and reset them to zero.
+		Statistics statistics();
 
 	private:
 		enum State
@@ -42,15 +49,13 @@ namespace goldobot
 		size_t m_begin_index;
 		size_t m_end_index;
 
-	    uint16_t m_message_size;
+	    size_t m_message_size;
 	    uint16_t m_message_type;
 	    uint16_t m_state;
 		uint16_t m_crc;
 		uint8_t m_sequence_number{0};
-		uint8_t m_last_sequence_number{0};
+		uint8_t m_expected_sequence_number{0};
 
 		Statistics m_statistics;
-		int m_corrupted_messages{0};
-		int m_lost_messages{0};
 	};
 }

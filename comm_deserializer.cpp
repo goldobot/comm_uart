@@ -1,8 +1,9 @@
-#include "comm_deserializer.hpp"
+#include "goldobot/comm_deserializer.hpp"
+#include "goldobot/utils/crc.hpp"
+
+#include <algorithm>
 
 using namespace goldobot;
-
-uint16_t update_crc16(const unsigned char* data_p, size_t length, uint16_t crc = 0xFFFF);
 
 size_t read_varint(uint16_t* val, unsigned char* buffer)
 {
@@ -20,6 +21,22 @@ size_t read_varint(uint16_t* val, unsigned char* buffer)
     }
 }
 
+size_t read_varint(size_t* val, unsigned char* buffer)
+{
+	if (!(buffer[0] & 0x80))
+	{
+		*val = buffer[0];
+		return 1;
+	}
+	else
+	{
+		uint16_t decoded = (buffer[0] & 0x7F);
+		decoded = (decoded << 8) | buffer[1];
+		*val = decoded;
+		return 2;
+	}
+}
+
 CommDeserializer::CommDeserializer(unsigned char* buffer, size_t buffer_size):
 	m_buffer(buffer),
 	m_buffer_size(buffer_size),
@@ -30,9 +47,19 @@ CommDeserializer::CommDeserializer(unsigned char* buffer, size_t buffer_size):
 
 }
 
-size_t CommDeserializer::push_data(unsigned char* buffer, size_t size)
+CommDeserializer::Statistics CommDeserializer::statistics()
 {
-	for (unsigned i = 0; i< size; i++)
+	auto statistics = m_statistics;
+	m_statistics = Statistics();
+	return statistics;
+}
+
+size_t CommDeserializer::push_data(unsigned char* buffer, size_t buffer_size)
+{
+	size_t space_available = m_buffer_size - size() - 1;
+	size_t bytes_received = std::min(space_available, buffer_size);
+
+	for (unsigned i = 0; i< bytes_received; i++)
 	{
 		m_buffer[m_end_index] = buffer[i];
 		m_end_index++;
@@ -41,8 +68,11 @@ size_t CommDeserializer::push_data(unsigned char* buffer, size_t size)
 			m_end_index = 0;
 		}
 	}
+
 	do_parse();
-	return size;
+	m_statistics.bytes_received += bytes_received;
+	m_statistics.buffer_high_watermark = std::max<uint32_t>(m_statistics.buffer_high_watermark, size());
+	return bytes_received;
 }
 
 size_t CommDeserializer::size() const
@@ -87,7 +117,7 @@ void CommDeserializer::read_data(size_t start_index, unsigned char* buffer, size
 void CommDeserializer::pop_data(size_t size)
 {
 	m_begin_index += size;
-	if (m_begin_index >= m_buffer_size)
+	while (m_begin_index >= m_buffer_size)
 	{
 		m_begin_index -= m_buffer_size;
 	}
@@ -100,30 +130,35 @@ void CommDeserializer::pop_message(unsigned char* buffer, size_t size)
 		read_data(m_begin_index, buffer, m_message_size);
 	}
 	pop_data(m_message_size + 2);
-	m_state = ReadHeader;
+	m_state = SearchMagic;
 
 	do_parse();
 }
 
 void CommDeserializer::do_parse()
 {
-	unsigned char magic[] = "goldobot~>";
-	magic[8] = 132;
-	magic[9] = 34;
+	unsigned char magic[] = { 0x0a, 0x35 };
+
 	while (m_begin_index != m_end_index)
 	{
 		switch (m_state)
 		{
 		case SearchMagic:
 		{
-			if (size() < sizeof(magic) - 1)
+			if (size() < sizeof(magic))
 			{
 				return;
 			}
 			size_t idx = m_begin_index;
 			unsigned j = 0;
-			while(j < sizeof(magic)-1 && idx != m_end_index)
+			while(j < sizeof(magic))
 			{
+				if (idx == m_end_index)
+				{
+					int a = size();
+					int b = sizeof(magic) - 1;
+					int c = 1;
+				}
 				if (m_buffer[idx] == magic[j])
 				{
 					j++;
@@ -138,7 +173,7 @@ void CommDeserializer::do_parse()
 					break;
 				}
 			}
-			if(j == sizeof(magic)-1)
+			if(j == sizeof(magic))
 			{
 				m_state = ReadHeader;
 				m_begin_index = idx;
@@ -154,7 +189,6 @@ void CommDeserializer::do_parse()
 
 		}
 			break;
-
 		case ReadHeader:
 		{
 			// Header is at most 6 bytes
@@ -168,6 +202,11 @@ void CommDeserializer::do_parse()
 			// Decode header data
 			unsigned char* ptr = buff + 2;
             m_sequence_number = buff[0] & 0x7f;
+			// reset sequence flag flag
+			if (buff[0] & 0x80)
+			{
+				m_expected_sequence_number = m_sequence_number;
+			}
 			ptr += read_varint(&m_message_type, ptr);
 			ptr += read_varint(&m_message_size, ptr);
 
@@ -205,9 +244,17 @@ void CommDeserializer::do_parse()
 				if (m_crc == *(uint16_t*)(buff))
 				{
 					m_state = MessageReady;
+					m_statistics.messages_received++;
+
+					if (m_sequence_number != m_expected_sequence_number)
+					{
+						m_statistics.sequence_errors++;
+					}
+					m_expected_sequence_number = ((m_sequence_number + 1) & 0x7f);
 				}
 				else
 				{
+					m_statistics.crc_errors++;
 					m_state = SearchMagic;
 				}
 			}
