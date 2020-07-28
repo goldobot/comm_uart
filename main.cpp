@@ -5,8 +5,8 @@
 #include <unistd.h>
 #include <zmq.h>
 
-#include "comm_serializer.hpp"
-#include "comm_deserializer.hpp"
+#include "goldobot/comm_serializer.hpp"
+#include "goldobot/comm_deserializer.hpp"
 
 void* zmq_context = nullptr;
 void* pub_socket = nullptr;
@@ -81,16 +81,77 @@ void init_zmq()
 
 int main(int argc, char *argv[])
 {
-    char *portname = "/dev/ttyACM0";
+    if(argc < 2)
+    {
+        printf("Usage: comm_uart device_path [baudrate, default=230400]");
+        return 0;
+    };
+    
+    
     int fd;
     
     init_zmq();
 
-    fd = open(portname, O_RDWR | O_NOCTTY | O_SYNC);
+    fd = open(argv[1], O_RDWR | O_NOCTTY | O_SYNC);
+    
     if (fd<0) {
-        printf("Cannot open uart device (%s)\n", portname);
+        printf("Cannot open uart device (%s)\n", argv[1]);
         return -1;
     }
+    
+    int speed = B230400;
+    if(argc == 3)
+    {
+        if(strcmp(argv[2], "4800") == 0)
+        {
+            speed = B4800;
+        } 
+        if(strcmp(argv[2], "9600") == 0)
+        {
+            speed = B9600;
+        } 
+        if(strcmp(argv[2], "19200") == 0)
+        {
+            speed = B19200;
+        }
+        if(strcmp(argv[2], "38400") == 0)
+        {
+            speed = B38400;
+        }
+        if(strcmp(argv[2], "57600") == 0)
+        {
+            speed = B57600;
+        }
+        if(strcmp(argv[2], "115200") == 0)
+        {
+            speed = B115200;
+        }
+        if(strcmp(argv[2], "230400") == 0)
+        {
+            speed = B230400;
+        }
+        if(strcmp(argv[2], "460800 ") == 0)
+        {
+            speed = B460800;
+        }
+        if(strcmp(argv[2], "500000") == 0)
+        {
+            speed = B500000;
+        }
+        if(strcmp(argv[2], "576000") == 0)
+        {
+            speed = B576000;
+        }
+        if(strcmp(argv[2], "921600") == 0)
+        {
+            speed = B921600;
+        }
+        if(strcmp(argv[2], "1000000") == 0)
+        {
+            speed = B1000000;
+        }
+    }
+    
     set_interface_attribs(fd, B230400);    
 
     zmq_pollitem_t poll_items[2];
