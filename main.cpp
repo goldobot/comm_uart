@@ -1,6 +1,8 @@
 #include <errno.h>
 #include <fcntl.h> 
 #include <string.h>
+#include <signal.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 #include <zmq.h>
@@ -11,6 +13,13 @@
 void* zmq_context = nullptr;
 void* pub_socket = nullptr;
 void* sub_socket = nullptr;
+
+volatile int keep_running = 1;
+
+static void sigint_handler(int sig)
+{
+    keep_running = 0;
+}
 
 int set_interface_attribs(int fd, int speed)
 {
@@ -71,37 +80,32 @@ void init_zmq()
 
     pub_socket = zmq_socket(zmq_context, ZMQ_PUB);
     rc = zmq_bind(pub_socket, "tcp://*:3001");
-    if(rc != 0) printf("failed to bind pub socket");
-
+    if(rc != 0) 
+    {
+        printf("failed to bind pub socket\n");
+        _exit(0);
+    }
     sub_socket = zmq_socket(zmq_context, ZMQ_SUB);  
     rc = zmq_bind(sub_socket, "tcp://*:3002");
     zmq_setsockopt(sub_socket,ZMQ_SUBSCRIBE, "", 0); 
-    if(rc != 0) printf("failed to bind sub socket");
+    if(rc != 0) printf("failed to bind sub socket\n");
 };
 
 int main(int argc, char *argv[])
 {
     if(argc < 2)
     {
-        printf("Usage: comm_uart device_path [baudrate, default=230400]");
+        printf("Usage: comm_uart device_path [baudrate, default=230400]\n");
         return 0;
     };
-    
-    
-    int fd;
-    
-    init_zmq();
+    signal(SIGINT, sigint_handler);
 
-    fd = open(argv[1], O_RDWR | O_NOCTTY | O_SYNC);
     
-    if (fd<0) {
-        printf("Cannot open uart device (%s)\n", argv[1]);
-        return -1;
-    }
-    
+
     int speed = B230400;
     if(argc == 3)
     {
+        speed = 0;
         if(strcmp(argv[2], "4800") == 0)
         {
             speed = B4800;
@@ -150,11 +154,26 @@ int main(int argc, char *argv[])
         {
             speed = B1000000;
         }
+        if(speed ==0 )
+        {
+            printf("Invalid baudrate\n");
+            return -1;
+        }
     }
     
-    set_interface_attribs(fd, B230400);    
+    int fd;
+   
+    fd = open(argv[1], O_RDWR | O_NOCTTY | O_SYNC );
 
-    zmq_pollitem_t poll_items[2];
+    if (fd<0) {
+        printf("Cannot open uart device (%s)\n", argv[1]);
+        return -1;
+    }
+    
+    set_interface_attribs(fd, speed);
+    
+     init_zmq();
+    zmq_pollitem_t poll_items[3];
 
     poll_items[0].socket = 0;
     poll_items[0].fd = fd;
@@ -163,16 +182,23 @@ int main(int argc, char *argv[])
     poll_items[1].socket = sub_socket;
     poll_items[1].fd = 0;
     poll_items[1].events = ZMQ_POLLIN;
+    
+    poll_items[2].socket = 0;
+    poll_items[2].fd = fd;
+    poll_items[2].events = ZMQ_POLLOUT;
 
     unsigned char recv_buffer[4096];
     unsigned char serialize_buffer[4096];
     unsigned char tmp_buffer[1024];
+
     goldobot::CommDeserializer deserializer(recv_buffer, sizeof(recv_buffer));
     goldobot::CommSerializer serializer(serialize_buffer, sizeof(serialize_buffer));
-    while(1)
-    {
-        zmq_poll (poll_items, 2, -1);
 
+    while(keep_running)
+    {
+        zmq_poll(poll_items, 2, 10);
+
+        // Read data from uart
         if(poll_items[0].revents && ZMQ_POLLIN)
         {
             int rdlen;
@@ -188,31 +214,40 @@ int main(int argc, char *argv[])
 
                 zmq_send(pub_socket, (const char*)(&recv_message_type), 2, ZMQ_SNDMORE);
                 zmq_send(pub_socket, (const char*)(tmp_buffer), recv_message_size, 0);
-
-                if(recv_message_type == 0)
-                {
-                    // Echo synchronization messages
-                    serializer.push_message(0, (unsigned char*)"goldobot", 8);
-                }
             }
         }
+        // Read message from zmq
         if(poll_items[1].revents && ZMQ_POLLIN)
-        {   
+        {
             unsigned char buff[1024];
             size_t bytes_read = 0;
             int64_t more=1;
             size_t more_size = sizeof(more);
             while(more)
             {
-                bytes_read += zmq_recv(sub_socket, buff + bytes_read, sizeof(buff) - bytes_read, 0);           
+                bytes_read += zmq_recv(sub_socket, buff + bytes_read, sizeof(buff) - bytes_read, 0);
                 zmq_getsockopt(sub_socket, ZMQ_RCVMORE, &more, &more_size);
             }
             buff[bytes_read] = 0;
             uint16_t message_type = *(uint16_t*)(buff);
             serializer.push_message(message_type, buff+2, bytes_read - 2);
         }
-        size_t dlen = serializer.pop_data(tmp_buffer, sizeof(tmp_buffer));
-        write(fd, tmp_buffer, dlen);
+        // Send data to uart
+        {
+            int bytes_in_buffer = 0;
+            ioctl(fd, TIOCOUTQ, &bytes_in_buffer);
+            
+            if(serializer.size() > 0 && bytes_in_buffer < 1024)
+            {   
+                size_t dlen = serializer.pop_data(tmp_buffer, sizeof(tmp_buffer));
+                write(fd, tmp_buffer, dlen);
+            }
+        }
     }
+    printf("close zmq sockets\n");
+    zmq_close(pub_socket);
+    zmq_close(sub_socket);
+    close(fd);
     zmq_term(zmq_context);
 }
+
