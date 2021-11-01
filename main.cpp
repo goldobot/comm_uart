@@ -1,7 +1,8 @@
 //#include <errno.h>
-#include <fcntl.h> 
+#include <fcntl.h>
 #include <string.h>
 #include <signal.h>
+#include <time.h>
 
 #include <unistd.h>
 
@@ -19,7 +20,7 @@
 int terminal_parse_speed(std::string speed_str);
 
 void close_zmq();
-bool init_zmq(uint16_t pub_port, uint16_t sub_port);
+bool init_zmq(uint16_t pub_port, uint16_t sub_port, uint8_t comm_id);
 
 int set_interface_attribs(int fd, int speed);
 void set_mincount(int fd, int mcount);
@@ -35,7 +36,7 @@ static void sigint_handler(int sig)
 // pub port default 3001
 // sub port default 3002
 
-enum  optionIndex { UNKNOWN, HELP, PUB_PORT, SUB_PORT , BAUDRATE, DEVICE};
+enum  optionIndex { UNKNOWN, HELP, PUB_PORT, SUB_PORT , BAUDRATE, DEVICE, COMM_ID};
 const option::Descriptor usage[] =
 {
  {UNKNOWN, 0, "", "",option::Arg::None, "Usage: comm_uart [Options] device_path\n\n"
@@ -45,71 +46,86 @@ const option::Descriptor usage[] =
  {SUB_PORT, 0,"s","sub",option::Arg::Optional, "  --sub, -s  \tSUB port number." },
  {BAUDRATE, 0,"b","baudrate",option::Arg::Optional, "  --baudrate, -b  \tuart baudrate." },
  {DEVICE, 0,"d","device",option::Arg::Optional, "  --device, -d  \tdevice." },
+ {COMM_ID, 0,"i","id",option::Arg::Optional, "  --id, -i  \tcomm ide." },
  {UNKNOWN, 0, "", "",option::Arg::Optional, "\nExamples:\n"
                                "  example --unknown -- --this_is_no_option\n"
                                "  example -unk --plus -ppp file1 file2\n" },
  {0,0,0,0,0,0}
 };
 
+struct MessageHeader {
+    uint8_t comm_id{0};
+    uint8_t reserved{0};
+    uint16_t message_type{0};
+    uint32_t time_seconds;
+    int32_t time_nanoseconds;
+};
+
 int main(int argc, char *argv[])
 {
     argc-=(argc>0); argv+=(argc>0); // skip program name argv[0] if present
-    
+
     option::Stats  stats(usage, argc, argv);
     option::Option options[stats.options_max], buffer[stats.buffer_max];
     option::Parser parse(usage, argc, argv, options, buffer);
-    
+
+    uint8_t comm_id{0};
     if (parse.error())
         return 1;
-    
+
     if (options[HELP] || argc == 0) {
         option::printUsage(std::cout, usage);
         return 0;
     }
-    
-    uint16_t pub_port = 3001;    
+
+    uint16_t pub_port = 3001;
     if (options[PUB_PORT])
-    {        
+    {
         pub_port = std::atoi(options[PUB_PORT].arg);
     };
-    
-    uint16_t sub_port = 3002;    
+
+    uint16_t sub_port = 3002;
     if (options[SUB_PORT])
-    {        
+    {
         sub_port = std::atoi(options[SUB_PORT].arg);
     };
-    
+
     std::string speed = "230400";
     if (options[BAUDRATE])
-    {        
+    {
         speed = std::string(options[BAUDRATE].arg);
     };
-    
+
     std::string device_path = "";
     if (options[DEVICE])
-    {        
+    {
         device_path = std::string(options[DEVICE].arg);
     };
-    
-    std::cout << "PUB port: " << pub_port << " SUB port: " << sub_port << "\n";
+
+    if (options[COMM_ID])
+    {
+        comm_id = std::atoi(options[COMM_ID].arg);
+    };
+
+    std::cout << "PUB port: " << pub_port << " SUB port: " << sub_port << "comm id: " << comm_id << "\n";
     std::cout << "device: " << device_path << " baudrate: " << speed << "\n";
-    
+
     signal(SIGINT, sigint_handler);
-    
+
     int fd;
-   
+
     fd = open(device_path.c_str(), O_RDWR | O_NOCTTY | O_SYNC );
 
     if (fd<0) {
         printf("Cannot open uart device (%s)\n", device_path.c_str());
         return -1;
     }
-    
+
     int baudrate_i = terminal_parse_speed(speed);
     set_interface_attribs(fd, baudrate_i);
-    
-    init_zmq(pub_port, sub_port);
-    
+
+    init_zmq(pub_port, sub_port, comm_id);
+
     zmq_pollitem_t poll_items[3];
 
     poll_items[0].socket = 0;
@@ -119,7 +135,7 @@ int main(int argc, char *argv[])
     poll_items[1].socket = sub_socket;
     poll_items[1].fd = 0;
     poll_items[1].events = ZMQ_POLLIN;
-    
+
     poll_items[2].socket = 0;
     poll_items[2].fd = fd;
     poll_items[2].events = ZMQ_POLLOUT;
@@ -143,21 +159,31 @@ int main(int argc, char *argv[])
             rdlen = read(fd, tmp_buffer, sizeof(tmp_buffer));
             deserializer.push_data(tmp_buffer, rdlen);
 
+            struct timespec tv;
+            clock_gettime(CLOCK_MONOTONIC, &tv);
+
             while(deserializer.message_ready())
             {
                 uint16_t recv_message_type = deserializer.message_type();
                 size_t recv_message_size = deserializer.message_size();
                 deserializer.pop_message(tmp_buffer, sizeof(tmp_buffer));
 
-                zmq_send(pub_socket, (const char*)(&recv_message_type), 2, ZMQ_SNDMORE);
+                MessageHeader header;
+                header.comm_id = comm_id;
+                header.message_type = recv_message_type;
+                header.time_seconds = tv.tv_sec;
+                header.time_nanoseconds = tv.tv_nsec;
+
+                zmq_send(pub_socket, (const char*)(&header), sizeof(header), ZMQ_SNDMORE);
                 zmq_send(pub_socket, (const char*)(tmp_buffer), recv_message_size, 0);
             }
         }
-        
+
         // Read message from zmq
         if(poll_items[1].revents && ZMQ_POLLIN)
         {
             unsigned char buff[1024];
+            MessageHeader header;
             size_t bytes_read = 0;
             int64_t more=1;
             size_t more_size = sizeof(more);
@@ -167,24 +193,27 @@ int main(int argc, char *argv[])
                 zmq_getsockopt(sub_socket, ZMQ_RCVMORE, &more, &more_size);
             }
             buff[bytes_read] = 0;
-            uint16_t message_type = *(uint16_t*)(buff);
-            serializer.push_message(message_type, buff+2, bytes_read - 2);
+            if(bytes_read >= sizeof(header))
+            {
+                memcpy(&header, buff, sizeof(header));
+                serializer.push_message(header.message_type, buff+sizeof(header), bytes_read - sizeof(header));
+            };
         }
-        
+
         // Send data to uart
         {
             int bytes_in_buffer = terminal_bytes_in_buffer(fd);
-            
+
             if(serializer.size() > 0 && bytes_in_buffer < 1024)
-            {   
+            {
                 size_t dlen = serializer.pop_data(tmp_buffer, sizeof(tmp_buffer));
                 write(fd, tmp_buffer, dlen);
             }
         }
     }
-    
+
     printf("close zmq sockets\n");
     close_zmq(),
-    close(fd);    
+    close(fd);
 }
 

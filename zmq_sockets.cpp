@@ -5,7 +5,7 @@ void* zmq_context = nullptr;
 void* pub_socket = nullptr;
 void* sub_socket = nullptr;
 
-bool init_zmq(uint16_t pub_port, uint16_t sub_port)
+bool init_zmq(uint16_t pub_port, uint16_t sub_port, uint8_t comm_id)
 {
     int rc;
     zmq_context = zmq_init(1);      
@@ -36,7 +36,7 @@ bool init_zmq(uint16_t pub_port, uint16_t sub_port)
     
     sub_socket = zmq_socket(zmq_context, ZMQ_SUB);  
     rc = zmq_bind(sub_socket, str.c_str());
-    zmq_setsockopt(sub_socket,ZMQ_SUBSCRIBE, "", 0); 
+    zmq_setsockopt(sub_socket,ZMQ_SUBSCRIBE, &comm_id, 1); 
     
     if(rc != 0) 
     {
